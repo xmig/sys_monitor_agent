@@ -28,7 +28,6 @@
 
 #define USESSL
 #ifdef USESSL
-#include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <boost/asio/ssl.hpp>
 #include <boost/beast/ssl.hpp>
@@ -40,7 +39,7 @@ namespace http = beast::http;
 
 typedef unsigned long int ulong;
 
-std::string VERSION = "1.14.0 (free) tcp host dailyreport hostinfo iftop xtext kill_mem";
+std::string VERSION = "1.14.2 (free) tcp host dailyreport hostinfo iftop xtext kill_mem";
 int DEBOUNCE_TIME_SEC = 10 * 60;
 
 std::string APP_KEY = "NEWTESTKEY";
@@ -194,6 +193,14 @@ uint64_t time_current_seconds() {
 uint64_t time_current_milliseconds() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+void
+tick(boost::asio::steady_timer& timer, int seconds)
+{
+    timer.expires_after(std::chrono::seconds(seconds));
+    std::cout << "tick:: " << time_current_milliseconds() << std::endl;
+    timer.async_wait([&, seconds](auto) { tick(timer, seconds); });
 }
 
 
@@ -441,7 +448,8 @@ std::string cpu_usage() {
 
     if (nproc <=0) {
         nproc = atoi(exec_command("nproc").c_str());
-        std::cout << "\n";
+        std::cout << "nproc:::" << "\n";
+        nproc = 1;
     }
     nproc = nproc > 0 ? nproc : 1;
     if (cpu_start_status.empty()) {
@@ -590,7 +598,7 @@ void kill_process(int current_pid) {
 }
 
 
-class PerformSender {
+class Agent {
 private:
     boost::asio::ip::udp::endpoint endpoint_;
     boost::asio::ip::udp::socket socket_;
@@ -611,7 +619,7 @@ private:
     std::unordered_map<std::string, std::time_t> message_sent_map_;
 
 public:
-    PerformSender(boost::asio::io_context& ioc,
+    Agent(boost::asio::io_context& ioc,
                            unsigned timeout_sec,
                            const boost::asio::ip::address& multicast_address,
                            short unsigned port,
@@ -1048,7 +1056,7 @@ public:
 
     void handle_send_to(const boost::system::error_code& ec, size_t bytes_recvd) {
         if (!ec) {
-            timer_.expires_from_now(std::chrono::seconds{timeout_});
+            timer_.expires_after(std::chrono::seconds{timeout_});
             timer_.async_wait([this](const boost::system::error_code &ec) { handle_timeout(ec); });
         }
         else {
@@ -1197,13 +1205,17 @@ int main(int argc, char* argv[]) {
         }
 
         boost::asio::io_context ioc;
-        PerformSender sender(ioc,
-                             atoi(timeout_sec),
-                             boost::asio::ip::address::from_string(address),
-                             (short unsigned)atoi(port),
-                             params,
-                             SLACK_PATH,
-                             self_print);
+
+        auto timer = boost::asio::steady_timer(ioc);
+        tick(timer, 10);
+
+        Agent agent(ioc,
+                     atoi(timeout_sec),
+                     boost::asio::ip::make_address(address),
+                     (short unsigned)atoi(port),
+                     params,
+                     SLACK_PATH,
+                     self_print);
         ioc.run();
     }
     catch (std::exception& e) {
