@@ -1,0 +1,51 @@
+cmake_minimum_required(VERSION 3.25)
+project(monitor)
+set(APP dsp)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# set(CMAKE_CXX_COMPILER "g++") # avoid forcing on macOS unless you really need GCC
+
+set(MAIN_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+
+# MAC
+# Configure in CLion CMake options:
+#   -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+
+find_package(Boost COMPONENTS
+        system
+        filesystem
+        program_options
+        json
+        REQUIRED)
+
+if(NOT Boost_FOUND)
+    message(FATAL_ERROR "?Could not find boost!")
+endif()
+
+
+find_package(OpenSSL REQUIRED)
+
+message(STATUS "CURRENT_SOURCE_DIR: ${MAIN_SRC_DIR}")
+message(STATUS "Boost_INCLUDE_DIRS: ${Boost_INCLUDE_DIRS}")
+message(STATUS "Boost_LIBRARIES: ${Boost_LIBRARIES}")
+message(STATUS "Boost_VERSION: ${Boost_VERSION}")
+message(STATUS "OpenSSL_VERSION: ${OpenSSL_VERSION}")
+
+add_compile_definitions(CURRENT_SOURCE_DIR="${MAIN_SRC_DIR}")
+add_compile_options(
+#        -O3
+        -g
+)
+
+add_executable(${APP}
+        sys_monitor_agent.cpp
+)
+
+target_include_directories(${APP} PRIVATE ${Boost_INCLUDE_DIRS})
+
+target_link_libraries(${APP}
+        PRIVATE Boost::boost
+        PRIVATE OpenSSL::SSL
+        PRIVATE OpenSSL::Crypto
+)

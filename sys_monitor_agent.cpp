@@ -26,7 +26,7 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
 
-#define USESSL
+// #define USESSL
 #ifdef USESSL
 #include <openssl/rand.h>
 #include <boost/asio/ssl.hpp>
@@ -967,7 +967,9 @@ public:
                                                 + "] was kill because CPU " + std::to_string(cpu_usage)
                                                 + "% exceed the limit " + std::to_string(max_cpu_bound) +
                                                 "%; Process info: " + line;
+#ifdef USESSL
                                         send_message(getSlackInfraChannel(), message);
+#endif
                                     }
                                 }
                             }
@@ -986,7 +988,10 @@ public:
                                                 + "] was kill because MEMORY usage " + std::to_string(mem_usage)
                                                 + "% exceed the limit " + std::to_string(max_mem_bound) +
                                                 "%; Process info: " + line;
+#ifdef USESSL
                                         send_message(getSlackInfraChannel(), message);
+#endif
+
                                     }
                                 }
                             }
