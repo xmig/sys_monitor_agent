@@ -1,3 +1,9 @@
+// [AI] Системный агент мониторинга. Собирает метрики хоста (CPU, память, сеть, диски,
+// [AI] процессы, docker) и отправляет их по UDP/multicast в формате JSON.
+// [AI] Целевые платформы: Linux (полный набор метрик) и macOS (частичная поддержка,
+// [AI] без /proc-метрик). Windows НЕ поддерживается намеренно.
+// [AI] Зависимости: Boost (asio, beast, algorithm, json), OpenSSL (опционально для Slack/HTTPS).
+// [AI] Сборка: CMake 3.25+, C++20. Единственный исполняемый файл: dsp.
 #include <sys/statvfs.h>
 #include <string>
 #include <unistd.h>
@@ -26,6 +32,9 @@
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
 
+// [AI] USESSL отключён по умолчанию. Без него: нет Slack-уведомлений, нет проверки хостов
+// [AI] в реальном времени (блок `host` всегда возвращает статус "OK" без реальной проверки).
+// [AI] Для включения: раскомментировать #define USESSL и пересобрать с OpenSSL.
 // #define USESSL
 #ifdef USESSL
 #include <openssl/rand.h>
@@ -133,6 +142,10 @@ public:
 
 
 
+// [AI] ВНИМАНИЕ: мёртвый код. Блок CRYPTO_USESSL содержит собственный main() и никогда
+// [AI] не компилируется вместе с основным проектом. boost::crypto не существует в стандартной
+// [AI] поставке Boost — этот фрагмент является незавершённым прототипом шифрования.
+// [AI] Рекомендация: вынести в отдельный файл-прототип или удалить.
 #ifdef CRYPTO_USESSL
 
 #include <boost/crypto.hpp>
