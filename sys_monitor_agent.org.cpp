@@ -26,9 +26,6 @@
 #include <boost/unordered_map.hpp>
 #include <thread>
 #include <unordered_set>
-#include <array>
-#include <deque>
-#include <memory>
 
 
 #include <boost/beast/core.hpp>
@@ -613,109 +610,6 @@ void kill_process(int current_pid) {
     auto ps_info = exec_command(command.c_str());
 }
 
-// [AI-NEW] TCP session: async write queue + disconnect detection via read loop.
-// Each connected client gets its own TcpSession; messages are pushed via deliver().
-class TcpSession : public std::enable_shared_from_this<TcpSession> {
-public:
-    explicit TcpSession(boost::asio::ip::tcp::socket socket)
-        : socket_(std::move(socket)) {}
-
-    void start() {
-        do_read();
-    }
-
-    // [AI-NEW] Queue a message for delivery. Thread-safe only when called from
-    // the TcpServer's io_context (i.e., via boost::asio::post).
-    void deliver(const std::string& msg) {
-        bool idle = write_queue_.empty();
-        write_queue_.push_back(msg + "\n");
-        if (idle) do_write();
-    }
-
-private:
-    // [AI-NEW] Read loop solely to detect client disconnect.
-    void do_read() {
-        auto self = shared_from_this();
-        socket_.async_read_some(boost::asio::buffer(read_buf_),
-            [this, self](boost::system::error_code ec, std::size_t) {
-                if (!ec) do_read();
-                // on error the session shared_ptr is released → cleaned up by TcpServer
-            });
-    }
-
-    // [AI-NEW] Sequential async writes: start next write only after current completes.
-    void do_write() {
-        auto self = shared_from_this();
-        boost::asio::async_write(socket_,
-            boost::asio::buffer(write_queue_.front()),
-            [this, self](boost::system::error_code ec, std::size_t) {
-                if (!ec) {
-                    write_queue_.pop_front();
-                    if (!write_queue_.empty()) do_write();
-                } else {
-                    socket_.close();
-                }
-            });
-    }
-
-    boost::asio::ip::tcp::socket socket_;
-    std::deque<std::string>      write_queue_;
-    std::array<char, 64>         read_buf_;
-};
-
-// [AI-NEW] TCP server: owns its own io_context and thread so it does not
-// interfere with the main io_context that Agent/UDP runs on.
-// Call broadcast() from any thread — it posts to the server's io_context.
-class TcpServer {
-public:
-    explicit TcpServer(unsigned short port)
-        : acceptor_(ioc_, {boost::asio::ip::tcp::v4(), port}) {
-        do_accept();
-        thread_ = std::thread([this]{ ioc_.run(); });
-        std::cout << "TCP Server listening on port " << port << "\n";
-    }
-
-    ~TcpServer() {
-        ioc_.stop();
-        if (thread_.joinable()) thread_.join();
-    }
-
-    // [AI-NEW] Send message to all currently connected TCP clients.
-    void broadcast(const std::string& message) {
-        boost::asio::post(ioc_, [this, message]() {
-            // purge expired (disconnected) sessions
-            sessions_.erase(
-                std::remove_if(sessions_.begin(), sessions_.end(),
-                    [](const std::weak_ptr<TcpSession>& wp) { return wp.expired(); }),
-                sessions_.end());
-            for (auto& wp : sessions_) {
-                if (auto sp = wp.lock()) sp->deliver(message);
-            }
-        });
-    }
-
-private:
-    // [AI-NEW] Accept loop: keep accepting new TCP connections.
-    void do_accept() {
-        acceptor_.async_accept(
-            [this](boost::system::error_code ec, boost::asio::ip::tcp::socket socket) {
-                if (!ec) {
-                    std::cout << "TCP client connected from "
-                              << socket.remote_endpoint().address().to_string() << "\n";
-                    auto session = std::make_shared<TcpSession>(std::move(socket));
-                    sessions_.push_back(session);
-                    session->start();
-                }
-                do_accept();
-            });
-    }
-
-    boost::asio::io_context                      ioc_;       // [AI-NEW] must be declared before acceptor_
-    boost::asio::ip::tcp::acceptor               acceptor_;
-    std::vector<std::weak_ptr<TcpSession>>       sessions_;
-    std::thread                                  thread_;    // [AI-NEW] must be declared last
-};
-
 
 class Agent {
 private:
@@ -726,7 +620,6 @@ private:
     bool print_sent_message_;
     std::string params_;
     std::string slack_app_url_;
-    TcpServer* tcp_server_;  // [AI-NEW] optional TCP server; nullptr = TCP disabled
 
     std::string message_;
     boost::unordered_map<std::string, uint64_t> times_;
@@ -745,15 +638,13 @@ public:
                            short unsigned port,
                            const std::string & params,
                            const std::string & slack_app_url,
-                           bool print_sent_message,
-                           TcpServer* tcp_server = nullptr)  // [AI-NEW]
+                           bool print_sent_message)
             : endpoint_{multicast_address, port}
             , socket_{ioc, endpoint_.protocol()}
             , timer_(ioc)
             , timeout_{timeout_sec}
             , slack_app_url_{slack_app_url}
-            , print_sent_message_{print_sent_message}
-            , tcp_server_{tcp_server} {  // [AI-NEW]
+            , print_sent_message_{print_sent_message} {
 
         if (params.find("--actions=") != std::string::npos) {
             params_ = params.substr(strlen("--actions="), 1000);
@@ -1157,7 +1048,7 @@ public:
             }
             return inject_common_data(action, "[" + join(result, ",") + "]");
         }
-        return "INVALID MODE: " + message_type;
+        return "INVALID MODE";
     }
 
     void send_message(std::string message) {
@@ -1166,7 +1057,6 @@ public:
         }
         socket_.async_send_to(boost::asio::buffer(message), endpoint_,
                               [](const boost::system::error_code& ec, size_t bytes_recvd){ handle_and_do_noting(ec, bytes_recvd); });
-        if (tcp_server_) tcp_server_->broadcast(message);  // [AI-NEW]
     }
 
     void send_message_and_next(std::string message) {
@@ -1176,7 +1066,6 @@ public:
         }
         socket_.async_send_to(boost::asio::buffer(message), endpoint_,
                               [this](const boost::system::error_code& ec, size_t bytes_recvd){ handle_send_to(ec, bytes_recvd); });
-        if (tcp_server_) tcp_server_->broadcast(message);  // [AI-NEW]
         std::this_thread::sleep_for(std::chrono::milliseconds(1 * 1000));
     }
 
@@ -1265,8 +1154,8 @@ public:
 
 void usage_massage(const char * pname, const char * example) {
     std::cerr << "VERSION: [" << VERSION  << "]\n";
-    std::cerr << "USAGE:" << pname << " <multicast group / UDP IP > <port> <default_timeout_sec> [--actions=\"cpu:N,disk:N[<mount1;mount2;..>],df:N[<mount1;..>],ps:N,python:N,iftop:N,hostinfo:N,docker:N\", ...] [--tcpport=<port>] [-d | -p]\n";  // [AI-NEW] --tcpport
-    std::cerr << "FULL EXAMPLE: " << pname << " 127.0.0.1 6666 60 --actions=" << example << " --tcpport=7777\n";  // [AI-NEW]
+    std::cerr << "USAGE:" << pname << " <multicast group / UDP IP > <port> <default_timeout_sec> [--actions=\"cpu:N,disk:N[<mount1;mount2;..>],df:N[<mount1;..>],ps:N,python:N,iftop:N,hostinfo:N,docker:N\", ...]  [-d | -p]\n";
+    std::cerr << "FULL EXAMPLE: " << pname << " 127.0.0.1 6666 60 --actions=" << example << "\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -1285,7 +1174,6 @@ int main(int argc, char* argv[]) {
         auto timeout_sec = argv[3];
         bool need_daemonize = false;
         bool self_print = false;
-        int  tcp_port = 0;  // [AI-NEW] 0 = TCP server disabled
 
         for (auto i=4; i<argc; i++) {
             if(std::string(argv[i]).find("--actions=") == 0) {
@@ -1313,10 +1201,6 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            if(std::string(argv[i]).find("--tcpport=") == 0) {  // [AI-NEW]
-                tcp_port = atoi(argv[i] + strlen("--tcpport="));
-                continue;
-            }
             if (std::string(argv[i]) == "-d") {
                 need_daemonize = true;
                 continue;
@@ -1325,7 +1209,7 @@ int main(int argc, char* argv[]) {
                 self_print = true;
                 continue;
             }
-            std::cout << "unrecognised key '" << std::string(argv[i]) << "'\n";
+            std::cout << "unrecognised key '" << std::string(argv[5]) << "'\n";
             usage_massage(argv[0], params);
             return EXIT_FAILURE;
         }
@@ -1343,20 +1227,13 @@ int main(int argc, char* argv[]) {
         auto timer = boost::asio::steady_timer(ioc);
         tick(timer, 10);
 
-        // [AI-NEW] Optionally start TCP server (runs in its own thread/io_context).
-        std::unique_ptr<TcpServer> tcp_server;
-        if (tcp_port > 0) {
-            tcp_server = std::make_unique<TcpServer>((unsigned short)tcp_port);
-        }
-
         Agent agent(ioc,
                      atoi(timeout_sec),
                      boost::asio::ip::make_address(address),
                      (short unsigned)atoi(port),
                      params,
                      SLACK_PATH,
-                     self_print,
-                     tcp_server.get());  // [AI-NEW]
+                     self_print);
         ioc.run();
     }
     catch (std::exception& e) {
